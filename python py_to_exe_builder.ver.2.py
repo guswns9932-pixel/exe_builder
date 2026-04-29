@@ -59,25 +59,19 @@ def safe_read_text(path: Path, max_bytes: int = 2_000_000) -> str:
 
 def extract_hidden_import_candidates(text: str):
     cands = set()
-
     for m in re.findall(r"ModuleNotFoundError:\s+No module named ['\"]([^'\"]+)['\"]", text):
         cands.add(m.strip())
-
     for m in re.findall(r"ImportError:\s+No module named\s+([A-Za-z0-9_\.]+)", text):
         cands.add(m.strip())
-
     for m in re.findall(r"missing module named ['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE):
         cands.add(m.strip())
-
     for m in re.findall(r"Hidden import ['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE):
         cands.add(m.strip())
-
     cleaned = set()
     for x in cands:
         x = x.strip().strip(".")
         if x and " " not in x and len(x) < 200:
             cleaned.add(x)
-
     return sorted(cleaned)
 
 
@@ -85,18 +79,20 @@ class ExeBuilderApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Py → EXE 자동 변환기")
-        self.geometry("950x720")
-        self.minsize(950, 720)
+        self.geometry("950x760")
+        self.minsize(950, 760)
         self.resizable(True, True)
 
-        self.py_path = tk.StringVar()
-        self.exe_name = tk.StringVar()          # 출력 EXE 파일명 (확장자 제외)
+        # .py 파일 목록 (경로 문자열 리스트)
+        self.py_files: list[str] = []
+
+        self.exe_name = tk.StringVar()
         self.output_dir = tk.StringVar(value=get_default_output_dir())
         self.build_mode = tk.StringVar(value="onefile")
 
         self.enable_advanced = tk.BooleanVar(value=False)
         self.use_upx = tk.BooleanVar(value=False)
-        self.noconsole = tk.BooleanVar(value=True)  # 콘솔 창 숨김 여부
+        self.noconsole = tk.BooleanVar(value=True)
 
         self.enable_runtime_tmpdir = tk.BooleanVar(value=False)
         self.runtime_tmpdir = tk.StringVar(value="")
@@ -111,7 +107,6 @@ class ExeBuilderApp(tk.Tk):
         self.last_app_name = None
         self.last_exe_path = None
 
-        # 로그 큐: 백그라운드 스레드 → 메인 스레드 안전 전달
         self._log_queue = queue.Queue()
 
         self._build_ui_grid()
@@ -125,28 +120,54 @@ class ExeBuilderApp(tk.Tk):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # row0: 파일 경로 영역
+        # row0: 파일 목록 + 출력 설정
         frame_file = tk.Frame(self, padx=10, pady=10)
         frame_file.grid(row=0, column=0, sticky="ew")
         frame_file.grid_columnconfigure(1, weight=1)
 
-        tk.Label(frame_file, text=".py 파일 경로").grid(row=0, column=0, sticky="w")
-        tk.Entry(frame_file, textvariable=self.py_path).grid(row=0, column=1, padx=5, sticky="ew")
-        tk.Button(frame_file, text="찾기", command=self.select_py).grid(row=0, column=2)
+        # .py 파일 목록 (Listbox)
+        tk.Label(frame_file, text=".py 파일 목록").grid(row=0, column=0, sticky="nw", pady=(2, 0))
 
-        tk.Label(frame_file, text="출력 폴더").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        tk.Entry(frame_file, textvariable=self.output_dir).grid(row=1, column=1, padx=5, pady=(5, 0), sticky="ew")
-        tk.Button(frame_file, text="찾기", command=self.select_output_dir).grid(row=1, column=2, pady=(5, 0))
+        py_list_frame = tk.Frame(frame_file)
+        py_list_frame.grid(row=0, column=1, padx=5, sticky="ew")
+        py_list_frame.grid_columnconfigure(0, weight=1)
 
-        # EXE 파일명 입력
+        self.py_listbox = tk.Listbox(py_list_frame, height=4, selectmode="extended")
+        self.py_listbox.grid(row=0, column=0, sticky="ew")
+        self.py_listbox.bind("<<ListboxSelect>>", self._on_py_listbox_select)
+
+        scrollbar = tk.Scrollbar(py_list_frame, orient="vertical", command=self.py_listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.py_listbox.configure(yscrollcommand=scrollbar.set)
+
+        py_btn_frame = tk.Frame(frame_file)
+        py_btn_frame.grid(row=0, column=2, sticky="n", padx=(5, 0))
+        tk.Button(py_btn_frame, text="파일 추가", width=9, command=self.add_py_files).pack(pady=(0, 4))
+        tk.Button(py_btn_frame, text="선택 제거", width=9, command=self.remove_selected_py).pack(pady=(0, 4))
+        tk.Button(py_btn_frame, text="전체 제거", width=9, command=self.clear_py_files).pack()
+
+        # 출력 폴더
+        tk.Label(frame_file, text="출력 폴더").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(frame_file, textvariable=self.output_dir).grid(row=1, column=1, padx=5, pady=(8, 0), sticky="ew")
+        tk.Button(frame_file, text="찾기", command=self.select_output_dir).grid(row=1, column=2, pady=(8, 0))
+
+        # EXE 파일명 (파일 1개일 때만 활성)
         tk.Label(frame_file, text="EXE 파일명").grid(row=2, column=0, sticky="w", pady=(5, 0))
         exe_frame = tk.Frame(frame_file)
         exe_frame.grid(row=2, column=1, padx=5, pady=(5, 0), sticky="ew")
         exe_frame.grid_columnconfigure(0, weight=1)
-        tk.Entry(exe_frame, textvariable=self.exe_name).grid(row=0, column=0, sticky="ew")
-        tk.Label(exe_frame, text=".exe", fg="gray").grid(row=0, column=1, padx=(3, 0))
+        self.exe_name_entry = tk.Entry(exe_frame, textvariable=self.exe_name)
+        self.exe_name_entry.grid(row=0, column=0, sticky="ew")
+        self.exe_name_hint = tk.Label(exe_frame, text=".exe", fg="gray")
+        self.exe_name_hint.grid(row=0, column=1, padx=(3, 0))
+        self.lbl_exe_hint = tk.Label(
+            frame_file,
+            text="※ 파일이 2개 이상이면 각 파일명을 자동 사용",
+            fg="gray", font=("", 8)
+        )
+        self.lbl_exe_hint.grid(row=3, column=1, sticky="w", padx=5)
 
-        # row1: 중간 영역 (옵션 + import 분석 + 추천)
+        # row1: 중간 영역
         frame_mid = tk.Frame(self, padx=10, pady=5)
         frame_mid.grid(row=1, column=0, sticky="nsew")
         frame_mid.grid_columnconfigure(1, weight=1)
@@ -218,7 +239,7 @@ class ExeBuilderApp(tk.Tk):
         frame_import.grid_rowconfigure(1, weight=1)
         frame_import.grid_columnconfigure(0, weight=1)
 
-        tk.Label(frame_import, text="※ 선택한 모듈을 exclude 하면 실행 오류가 날 수 있습니다.").grid(row=0, column=0, sticky="w")
+        tk.Label(frame_import, text="※ 목록에서 파일을 클릭하면 import가 분석됩니다.").grid(row=0, column=0, sticky="w")
         self.import_listbox = tk.Listbox(frame_import, selectmode="multiple")
         self.import_listbox.grid(row=1, column=0, sticky="nsew", pady=(5, 5))
         tk.Button(frame_import, text="import 재분석", command=self.analyze_imports_for_selected_file).grid(row=2, column=0, sticky="e")
@@ -264,10 +285,9 @@ class ExeBuilderApp(tk.Tk):
         self.btn_quit.grid(row=0, column=2)
 
     # ------------------------------------------------------------------
-    # 스레드 안전 로그 처리
+    # 스레드 안전 로그
     # ------------------------------------------------------------------
     def _drain_log(self):
-        """메인 스레드에서 주기적으로 큐를 비워 로그 위젯에 출력."""
         try:
             while True:
                 text = self._log_queue.get_nowait()
@@ -280,8 +300,67 @@ class ExeBuilderApp(tk.Tk):
         self.after(100, self._drain_log)
 
     def append_log(self, text: str):
-        """어느 스레드에서나 안전하게 호출 가능."""
         self._log_queue.put(text)
+
+    # ------------------------------------------------------------------
+    # 파일 목록 관리
+    # ------------------------------------------------------------------
+    def add_py_files(self):
+        paths = filedialog.askopenfilenames(
+            title="파이썬(.py) 파일 선택 (복수 선택 가능)",
+            filetypes=[("Python Files", "*.py"), ("All Files", "*.*")]
+        )
+        added = 0
+        for p in paths:
+            if p not in self.py_files:
+                self.py_files.append(p)
+                self.py_listbox.insert(tk.END, p)
+                added += 1
+
+        self._update_exe_name_state()
+
+        if added > 0:
+            # 파일이 1개이고 새로 추가됐을 때 EXE 파일명 자동 채움
+            if len(self.py_files) == 1 and not self.exe_name.get().strip():
+                self.exe_name.set(Path(self.py_files[0]).stem)
+            # 마지막으로 추가된 파일을 선택해 import 분석
+            self.py_listbox.selection_clear(0, tk.END)
+            self.py_listbox.selection_set(tk.END)
+            self.analyze_imports_for_selected_file()
+
+    def remove_selected_py(self):
+        selected = list(self.py_listbox.curselection())
+        for idx in reversed(selected):
+            self.py_files.pop(idx)
+            self.py_listbox.delete(idx)
+        self._update_exe_name_state()
+        self.import_listbox.delete(0, tk.END)
+        self.import_modules = []
+
+    def clear_py_files(self):
+        self.py_files.clear()
+        self.py_listbox.delete(0, tk.END)
+        self.import_listbox.delete(0, tk.END)
+        self.import_modules = []
+        self._update_exe_name_state()
+
+    def _update_exe_name_state(self):
+        """파일 수에 따라 EXE 파일명 필드 활성/비활성 전환."""
+        count = len(self.py_files)
+        if count <= 1:
+            self.exe_name_entry.configure(state="normal")
+            self.exe_name_hint.configure(text=".exe", fg="gray")
+            if count == 0:
+                self.exe_name.set("")
+        else:
+            self.exe_name_entry.configure(state="disabled")
+            self.exe_name_hint.configure(
+                text="(파일 2개 이상: 각 파일명 자동 사용)", fg="gray"
+            )
+
+    def _on_py_listbox_select(self, _event=None):
+        """파일 목록에서 항목을 클릭하면 해당 파일의 import를 분석."""
+        self.analyze_imports_for_selected_file()
 
     # ------------------------------------------------------------------
     # UI 이벤트
@@ -292,18 +371,6 @@ class ExeBuilderApp(tk.Tk):
         else:
             self.chk_upx.configure(state="disabled")
             self.use_upx.set(False)
-
-    def select_py(self):
-        file_path = filedialog.askopenfilename(
-            title="파이썬(.py) 파일 선택",
-            filetypes=[("Python Files", "*.py"), ("All Files", "*.*")]
-        )
-        if file_path:
-            self.py_path.set(file_path)
-            # EXE 파일명이 비어있을 때만 자동 채움
-            if not self.exe_name.get().strip():
-                self.exe_name.set(Path(file_path).stem)
-            self.analyze_imports_for_selected_file()
 
     def select_output_dir(self):
         folder = filedialog.askdirectory(title="출력 폴더 선택")
@@ -319,7 +386,10 @@ class ExeBuilderApp(tk.Tk):
     # import 분석
     # ------------------------------------------------------------------
     def analyze_imports_for_selected_file(self):
-        py_path = self.py_path.get().strip()
+        """py_listbox에서 선택(단일)된 파일의 import를 분석."""
+        sel = self.py_listbox.curselection()
+        py_path = self.py_files[sel[-1]] if sel else (self.py_files[0] if self.py_files else "")
+
         self.import_modules = []
         self.import_listbox.delete(0, tk.END)
 
@@ -344,7 +414,7 @@ class ExeBuilderApp(tk.Tk):
                 label = f"[*] {m}" if m in HEAVY_MODULE_HINTS else m
                 self.import_listbox.insert(tk.END, label)
 
-            self.append_log("=== import 분석 완료 ===")
+            self.append_log(f"=== import 분석 완료: {Path(py_path).name} ===")
             self.append_log("발견된 모듈: " + ", ".join(self.import_modules))
         except Exception as e:
             self.append_log(f"import 분석 중 예외 발생: {e}")
@@ -436,9 +506,13 @@ class ExeBuilderApp(tk.Tk):
     # 빌드
     # ------------------------------------------------------------------
     def start_build_thread(self):
-        # UI 상태를 메인 스레드에서 미리 읽어 백그라운드에 전달
+        if not self.py_files:
+            messagebox.showerror("오류", ".py 파일을 하나 이상 추가해 주세요.")
+            return
+
+        # UI 상태를 메인 스레드에서 미리 수집
         params = {
-            "py_path": self.py_path.get().strip(),
+            "py_files": list(self.py_files),
             "out_dir": self.output_dir.get().strip() or get_default_output_dir(),
             "exe_name": self.exe_name.get().strip(),
             "build_mode": self.build_mode.get(),
@@ -455,35 +529,61 @@ class ExeBuilderApp(tk.Tk):
             "collect_sub": parse_multiline_list(self.txt_collect_sub.get("1.0", "end")),
             "collect_data": parse_multiline_list(self.txt_collect_data.get("1.0", "end")),
         }
-        threading.Thread(target=self._build_exe, args=(params,), daemon=True).start()
+        threading.Thread(target=self._build_all, args=(params,), daemon=True).start()
 
-    def _build_exe(self, p: dict):
-        py_path = p["py_path"]
-        out_dir = p["out_dir"]
-        exe_name = re.sub(r"\.exe$", "", p["exe_name"], flags=re.IGNORECASE)
-
-        if not py_path or not os.path.isfile(py_path):
-            messagebox.showerror("오류", ".py 파일을 올바르게 선택해 주세요.")
-            return
-
-        if not exe_name:
-            messagebox.showerror("오류", "EXE 파일명을 입력해 주세요.")
-            return
-
+    def _build_all(self, p: dict):
+        """선택된 모든 .py 파일을 순차적으로 빌드."""
         self.after(0, lambda: self.btn_build.config(state="disabled"))
-        self.after(0, lambda: self.status_text.set("빌드 중..."))
 
-        self.last_dist_dir = out_dir
-        self.last_app_name = exe_name
-        self.last_exe_path = None
+        py_files = p["py_files"]
+        total = len(py_files)
+        success_count = 0
+        fail_count = 0
 
-        self.append_log("======== 빌드 시작 ========")
-        self.append_log(f"입력 파일: {py_path}")
-        self.append_log(f"출력 폴더: {out_dir}")
-        self.append_log(f"EXE 파일명: {exe_name}.exe")
-        self.append_log(f"빌드 모드: {p['build_mode']}")
+        self.append_log(f"======== 일괄 빌드 시작: 총 {total}개 파일 ========")
 
-        # DEFAULT_PYINSTALLER_CMD가 "python -m PyInstaller" 형태여도 분리 처리
+        for idx, py_path in enumerate(py_files, start=1):
+            # 파일이 1개면 사용자 지정 이름, 2개 이상이면 stem 자동 사용
+            if total == 1 and p["exe_name"]:
+                exe_name = re.sub(r"\.exe$", "", p["exe_name"], flags=re.IGNORECASE)
+            else:
+                exe_name = Path(py_path).stem
+
+            self.append_log("")
+            self.append_log(f"────── [{idx}/{total}] {Path(py_path).name} → {exe_name}.exe ──────")
+            self.after(0, lambda i=idx, t=total, n=exe_name: self.status_text.set(f"빌드 중... ({i}/{t}) {n}.exe"))
+
+            ok = self._build_single(py_path, exe_name, p)
+            if ok:
+                success_count += 1
+            else:
+                fail_count += 1
+
+        self.append_log("")
+        self.append_log(f"======== 일괄 빌드 완료: 성공 {success_count} / 실패 {fail_count} / 전체 {total} ========")
+        self.after(0, lambda s=success_count, f=fail_count: self.status_text.set(
+            f"완료 — 성공 {s}개 / 실패 {f}개"
+        ))
+        self.after(0, self.refresh_recommendations_from_files)
+        self.after(0, lambda: self.btn_build.config(state="normal"))
+
+        if fail_count == 0:
+            messagebox.showinfo("완료", f"전체 {total}개 파일 빌드 성공!")
+        else:
+            messagebox.showwarning("완료(일부 실패)", f"성공: {success_count}개\n실패: {fail_count}개\n\n로그를 확인해 주세요.")
+
+    def _build_single(self, py_path: str, exe_name: str, p: dict) -> bool:
+        """단일 .py 파일 빌드. 성공이면 True 반환."""
+        out_dir = p["out_dir"]
+
+        if not os.path.isfile(py_path):
+            self.append_log(f"[ERROR] 파일을 찾을 수 없습니다: {py_path}")
+            return False
+
+        self.append_log(f"  입력: {py_path}")
+        self.append_log(f"  출력: {out_dir}/{exe_name}.exe")
+        self.append_log(f"  모드: {p['build_mode']}")
+
         cmd_base = DEFAULT_PYINSTALLER_CMD.split()
 
         if p["build_mode"] == "onedir":
@@ -496,14 +596,13 @@ class ExeBuilderApp(tk.Tk):
         if p["noconsole"]:
             cmd.append("--noconsole")
 
-        # runtime tmpdir (onefile 전용)
         if p["build_mode"] == "onefile" and p["enable_runtime_tmpdir"]:
             rtmp = p["runtime_tmpdir"]
             if rtmp:
                 cmd.extend(["--runtime-tmpdir", rtmp])
-                self.append_log(f"[INFO] runtime tmpdir 적용: {rtmp}")
+                self.append_log(f"  [INFO] runtime tmpdir: {rtmp}")
             else:
-                self.append_log("[WARN] runtime tmpdir 사용이 체크되어 있으나 경로가 비어있습니다.")
+                self.append_log("  [WARN] runtime tmpdir 경로가 비어있습니다.")
 
         cmd.extend(["--distpath", out_dir])
         cmd.extend(["--workpath", os.path.join(out_dir, "build")])
@@ -511,58 +610,32 @@ class ExeBuilderApp(tk.Tk):
 
         for m in DEFAULT_EXCLUDES:
             cmd.extend(["--exclude-module", m])
-            self.append_log(f"  - exclude-module(기본): {m}")
 
         if p["enable_advanced"]:
-            self.append_log("[INFO] 고급 용량 최적화 모드 활성화")
-
-            selected_modules = []
             for label in p["selected_labels"]:
                 mod_name = label[4:] if label.startswith("[*] ") else label
-                selected_modules.append(mod_name)
-
-            if selected_modules:
-                self.append_log("선택된 제외 모듈: " + ", ".join(selected_modules))
-                for m in selected_modules:
-                    cmd.extend(["--exclude-module", m])
-                    self.append_log(f"  - exclude-module(import 선택): {m}")
-            else:
-                self.append_log("선택된 import 제외 모듈 없음")
+                cmd.extend(["--exclude-module", mod_name])
 
             if p["use_upx"]:
                 upx_dir = UPX_PATH.strip()
                 if upx_dir:
                     cmd.extend(["--upx-dir", upx_dir])
-                    self.append_log(f"  - UPX 압축 사용 (경로: {upx_dir})")
+                    self.append_log(f"  [INFO] UPX 경로: {upx_dir}")
                 else:
-                    # --upx-dir 없이 사용하면 PyInstaller가 PATH에서 자동 탐색
-                    self.append_log("  - UPX 압축 사용 (PATH에서 자동 탐색)")
+                    self.append_log("  [INFO] UPX PATH 자동 탐색")
 
         for h in p["hidden_imports"]:
             cmd.extend(["--hidden-import", h])
-        if p["hidden_imports"]:
-            self.append_log("Hidden-import 적용: " + ", ".join(p["hidden_imports"]))
-
         for pkg in p["collect_all"]:
             cmd.extend(["--collect-all", pkg])
-        if p["collect_all"]:
-            self.append_log("Collect-all 적용: " + ", ".join(p["collect_all"]))
-
         for pkg in p["collect_sub"]:
             cmd.extend(["--collect-submodules", pkg])
-        if p["collect_sub"]:
-            self.append_log("Collect-submodules 적용: " + ", ".join(p["collect_sub"]))
-
         for pkg in p["collect_data"]:
             cmd.extend(["--collect-data", pkg])
-        if p["collect_data"]:
-            self.append_log("Collect-data 적용: " + ", ".join(p["collect_data"]))
 
         cmd.append(py_path)
 
-        self.append_log("실행 명령:")
-        self.append_log(" ".join(f'"{c}"' if " " in c else c for c in cmd))
-        self.append_log("")
+        self.append_log("  실행 명령: " + " ".join(f'"{c}"' if " " in c else c for c in cmd))
 
         try:
             proc = subprocess.Popen(
@@ -580,8 +653,7 @@ class ExeBuilderApp(tk.Tk):
             proc.wait()
 
             if proc.returncode == 0:
-                self.after(0, lambda: self.status_text.set("빌드 완료"))
-                self.append_log("======== 빌드 성공 ========")
+                self.append_log(f"  [OK] {exe_name}.exe 빌드 성공")
 
                 dist = Path(out_dir)
                 if p["build_mode"] == "onedir":
@@ -592,27 +664,19 @@ class ExeBuilderApp(tk.Tk):
                     exe = dist / f"{exe_name}.exe"
                     self.last_exe_path = str(exe) if exe.exists() else ""
 
-                self.after(0, self.refresh_recommendations_from_files)
-                messagebox.showinfo(
-                    "완료",
-                    f"EXE 빌드가 완료되었습니다.\n출력: {exe_name}.exe\n\n필요 시 추천 후보를 Hidden imports에 추가 후 재빌드하세요."
-                )
+                self.last_dist_dir = out_dir
+                self.last_app_name = exe_name
+                return True
             else:
-                self.after(0, lambda: self.status_text.set("빌드 실패"))
-                self.append_log("======== 빌드 실패 ========")
-                self.after(0, self.refresh_recommendations_from_files)
-                messagebox.showerror("오류", f"빌드 실패 (return code: {proc.returncode})")
+                self.append_log(f"  [FAIL] {exe_name}.exe 빌드 실패 (returncode={proc.returncode})")
+                return False
 
         except FileNotFoundError:
-            self.after(0, lambda: self.status_text.set("PyInstaller 실행 실패"))
-            self.append_log("PyInstaller를 찾을 수 없습니다. 설치 및 PATH 설정을 확인하세요.")
-            messagebox.showerror("오류", "PyInstaller를 찾을 수 없습니다.\n예: pip install pyinstaller")
+            self.append_log("  [ERROR] PyInstaller를 찾을 수 없습니다. pip install pyinstaller 를 실행하세요.")
+            return False
         except Exception as e:
-            self.after(0, lambda: self.status_text.set("예외 발생"))
-            self.append_log(f"예외 발생: {e}")
-            messagebox.showerror("오류", f"예외 발생: {e}")
-        finally:
-            self.after(0, lambda: self.btn_build.config(state="normal"))
+            self.append_log(f"  [ERROR] 예외 발생: {e}")
+            return False
 
 
 if __name__ == "__main__":
