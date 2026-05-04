@@ -54,13 +54,18 @@ _runpy.run_path(_os.path.join(_scripts, {main_script!r}), run_name='__main__')
 # (Windows 보안 정책: 네트워크 경로에서 DLL 로드 차단 우회)
 _BAT_TEMPLATE = """\
 @echo off
+:: ※ 이 파일은 네트워크 드라이브에서 직접 실행하면 보안 정책에 의해 차단될 수 있습니다.
+:: ※ 최초 1회: 이 파일을 로컬 PC (예: 바탕화면)에 복사한 후 실행하세요.
+:: ※ NET_BASE 경로는 빌드 시 자동으로 설정됩니다. 파일을 이동했다면 아래 경로를 수정하세요.
 setlocal
 chcp 65001 >nul 2>&1
 
 set APP_NAME={app_name}
-set NET_BASE=%~dp0
+set NET_BASE={net_base}
 set LOCAL_BASE=%LOCALAPPDATA%\\%APP_NAME%
 set PAUSE_NEEDED=0
+
+echo [%APP_NAME%] 시작 중...
 
 :: ── 최초 설치 (로컬에 EXE 없음) ─────────────────────────────────────
 if not exist "%LOCAL_BASE%\\%APP_NAME%.exe" goto :full_install
@@ -79,16 +84,17 @@ echo ============================================================
 echo  [첫 설치] %APP_NAME%
 echo ============================================================
 echo 잠시 기다려 주세요...
+echo 네트워크 원본: %NET_BASE%
+echo 로컬 대상    : %LOCAL_BASE%
 echo.
 if not exist "%LOCAL_BASE%" mkdir "%LOCAL_BASE%"
 xcopy /E /I /Q /Y "%NET_BASE%%APP_NAME%.exe" "%LOCAL_BASE%\\"
+if errorlevel 1 goto :copy_error
 xcopy /E /I /Q /Y "%NET_BASE%_internal\\" "%LOCAL_BASE%\\_internal\\"
-if exist "%NET_BASE%scripts\\" (
-    xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
-)
-if exist "%NET_BASE%version.txt" (
-    copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
-)
+if errorlevel 1 goto :copy_error
+xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
+if errorlevel 1 goto :copy_error
+copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
 echo.
 echo [설치 완료]
 echo 로컬 경로: %LOCAL_BASE%
@@ -102,12 +108,28 @@ set PAUSE_NEEDED=1
 echo ============================================================
 echo  [업데이트] %APP_NAME%
 echo ============================================================
-if exist "%NET_BASE%scripts\\" (
-    xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
-)
+xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
+if errorlevel 1 goto :copy_error
 copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
 echo [업데이트 완료]
 echo.
+goto :run
+
+:: ── 복사 오류 ────────────────────────────────────────────────────────
+:copy_error
+echo.
+echo [오류] 네트워크에서 파일을 복사하지 못했습니다.
+echo.
+echo 원인 1: 이 BAT 파일을 네트워크 드라이브에서 직접 실행했습니다.
+echo         해결 ^) 이 BAT 파일을 바탕화면 등 로컬 PC로 복사 후 실행하세요.
+echo.
+echo 원인 2: 네트워크 경로 접근 권한이 없습니다.
+echo         해결 ^) 네트워크 드라이브가 연결되어 있는지 확인하세요.
+echo         경로: %NET_BASE%
+echo.
+pause
+endlocal
+exit /b 1
 
 :: ── 로컬에서 실행 ────────────────────────────────────────────────────
 :run
@@ -864,7 +886,8 @@ class ExeBuilderApp(tk.Tk):
         self.append_log(f"  [OK] scripts/ 복사 완료: {copied}")
 
         # ── launch.bat 생성 (네트워크 DLL 로드 차단 우회) ──────────────
-        bat_content = _BAT_TEMPLATE.format(app_name=exe_name)
+        net_base = str(dist_app_dir).rstrip("\\") + "\\"
+        bat_content = _BAT_TEMPLATE.format(app_name=exe_name, net_base=net_base)
         bat_path = dist_app_dir / "launch.bat"
         try:
             bat_path.write_text(bat_content, encoding="utf-8")
