@@ -5,14 +5,19 @@ import queue
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import ast
 from pathlib import Path
 
 DEFAULT_PYINSTALLER_CMD = "pyinstaller"   # "python -m PyInstaller" 형태도 지원
 UPX_PATH = ""                              # PATH에 있으면 빈 문자열 가능
 
-DEFAULT_EXCLUDES = ["tkinter.test", "test", "unittest"]
+DEFAULT_EXCLUDES = [
+    "tkinter.test", "test", "unittest",
+    "doctest", "pdb", "pdbpp", "profile", "cProfile", "timeit",
+    "lib2to3", "distutils", "setuptools", "pkg_resources",
+    "difflib", "pydoc",
+]
 
 HEAVY_MODULE_HINTS = {
     "numpy", "pandas", "matplotlib", "scipy", "sklearn",
@@ -93,6 +98,8 @@ class ExeBuilderApp(tk.Tk):
         self.enable_advanced = tk.BooleanVar(value=False)
         self.use_upx = tk.BooleanVar(value=False)
         self.noconsole = tk.BooleanVar(value=True)
+        self.opt_level = tk.StringVar(value="1")   # --optimize 0/1/2
+        self.use_strip = tk.BooleanVar(value=False) # --strip (Linux/Mac)
 
         self.enable_runtime_tmpdir = tk.BooleanVar(value=False)
         self.runtime_tmpdir = tk.StringVar(value="")
@@ -180,25 +187,52 @@ class ExeBuilderApp(tk.Tk):
         frame_opt.grid_columnconfigure(0, weight=1)
 
         tk.Label(frame_opt, text="빌드 모드").grid(row=0, column=0, sticky="w")
-        tk.Radiobutton(frame_opt, text="용량 우선 (onefile)", variable=self.build_mode, value="onefile").grid(row=1, column=0, sticky="w")
-        tk.Radiobutton(frame_opt, text="안정 모드 (onedir)", variable=self.build_mode, value="onedir").grid(row=2, column=0, sticky="w")
+        tk.Radiobutton(frame_opt, text="단일 파일 (onefile)", variable=self.build_mode, value="onefile").grid(row=1, column=0, sticky="w")
+        tk.Radiobutton(frame_opt, text="폴더 모드 (onedir)", variable=self.build_mode, value="onedir").grid(row=2, column=0, sticky="w")
+        tk.Label(
+            frame_opt,
+            text="  ※ onedir = 용량↑ 실행속도↑\n  ※ onefile = 용량↓ 실행속도↓",
+            fg="#888888", font=("", 8), justify="left"
+        ).grid(row=3, column=0, sticky="w")
+
+        ttk.Separator(frame_opt, orient="horizontal").grid(row=4, column=0, sticky="ew", pady=(8, 4))
+
+        # 바이트코드 최적화
+        tk.Label(frame_opt, text="바이트코드 최적화 (--optimize)").grid(row=5, column=0, sticky="w")
+        opt_frame = tk.Frame(frame_opt)
+        opt_frame.grid(row=6, column=0, sticky="w")
+        for text, val in [("없음(0)", "0"), ("기본(1)", "1"), ("적극적(2)", "2")]:
+            tk.Radiobutton(opt_frame, text=text, variable=self.opt_level, value=val).pack(side="left")
+        tk.Label(
+            frame_opt,
+            text="  1=assert/docstring 제거  2=1+이름최적화",
+            fg="#888888", font=("", 8), justify="left"
+        ).grid(row=7, column=0, sticky="w")
+
+        # 디버그 심볼 제거
+        tk.Checkbutton(
+            frame_opt, text="디버그 심볼 제거 (--strip)\n  ※ Windows 미지원",
+            variable=self.use_strip, justify="left"
+        ).grid(row=8, column=0, sticky="w", pady=(6, 0))
+
+        ttk.Separator(frame_opt, orient="horizontal").grid(row=9, column=0, sticky="ew", pady=(8, 4))
 
         tk.Checkbutton(
             frame_opt, text="콘솔 창 숨기기 (--noconsole)",
             variable=self.noconsole
-        ).grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ).grid(row=10, column=0, sticky="w")
 
         tk.Checkbutton(
             frame_opt, text="고급 용량 최적화 사용",
             variable=self.enable_advanced, command=self._on_advanced_toggle
-        ).grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ).grid(row=11, column=0, sticky="w", pady=(5, 0))
 
         self.chk_upx = tk.Checkbutton(frame_opt, text="UPX 압축 사용 (고급)", variable=self.use_upx, state="disabled")
-        self.chk_upx.grid(row=5, column=0, sticky="w", pady=(5, 0))
+        self.chk_upx.grid(row=12, column=0, sticky="w", pady=(5, 0))
 
         # runtime tmpdir
         frame_rtmp = tk.LabelFrame(frame_opt, text="Runtime tmpdir (onefile 전용)", padx=10, pady=10)
-        frame_rtmp.grid(row=6, column=0, sticky="ew", pady=(12, 0))
+        frame_rtmp.grid(row=13, column=0, sticky="ew", pady=(12, 0))
         frame_rtmp.grid_columnconfigure(0, weight=1)
 
         tk.Checkbutton(
@@ -214,7 +248,7 @@ class ExeBuilderApp(tk.Tk):
 
         # hidden / collect 입력
         frame_hidden = tk.LabelFrame(frame_opt, text="hidden-import / collect", padx=10, pady=10)
-        frame_hidden.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        frame_hidden.grid(row=14, column=0, sticky="ew", pady=(12, 0))
         frame_hidden.grid_columnconfigure(0, weight=1)
 
         tk.Label(frame_hidden, text="Hidden imports (줄/쉼표)").grid(row=0, column=0, sticky="w")
@@ -521,6 +555,8 @@ class ExeBuilderApp(tk.Tk):
             "use_upx": self.use_upx.get(),
             "enable_runtime_tmpdir": self.enable_runtime_tmpdir.get(),
             "runtime_tmpdir": self.runtime_tmpdir.get().strip(),
+            "opt_level": self.opt_level.get(),
+            "use_strip": self.use_strip.get(),
             "selected_labels": [
                 self.import_listbox.get(i) for i in self.import_listbox.curselection()
             ],
@@ -592,6 +628,17 @@ class ExeBuilderApp(tk.Tk):
             cmd = cmd_base + ["--onefile", "--clean"]
 
         cmd.extend(["--name", exe_name])
+
+        # 바이트코드 최적화
+        opt = int(p.get("opt_level", "1"))
+        if opt > 0:
+            cmd.extend(["--optimize", str(opt)])
+            self.append_log(f"  [OPT] --optimize {opt} 적용")
+
+        # 디버그 심볼 제거 (Linux/Mac만 효과 있음)
+        if p.get("use_strip"):
+            cmd.append("--strip")
+            self.append_log("  [OPT] --strip 적용 (디버그 심볼 제거)")
 
         if p["noconsole"]:
             cmd.append("--noconsole")
