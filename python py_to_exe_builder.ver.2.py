@@ -61,6 +61,11 @@ set APP_NAME={app_name}
 set NET_BASE=%~dp0
 set LOCAL_BASE=%LOCALAPPDATA%\\%APP_NAME%
 
+echo ============================================================
+echo  %APP_NAME% 런처
+echo  로컬 설치 경로: %LOCAL_BASE%
+echo ============================================================
+
 :: ── 최초 설치 (로컬에 EXE 없음) ─────────────────────────────────────
 if not exist "%LOCAL_BASE%\\%APP_NAME%.exe" goto :full_install
 
@@ -69,11 +74,12 @@ if not exist "%NET_BASE%version.txt" goto :run
 if not exist "%LOCAL_BASE%\\version.txt" goto :update_scripts
 fc /b "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul 2>&1
 if errorlevel 1 goto :update_scripts
+echo 최신 버전입니다.
 goto :run
 
 :: ── 최초 설치 ────────────────────────────────────────────────────────
 :full_install
-echo [%APP_NAME%] 첫 설치 중입니다. 잠시 기다려 주세요...
+echo [설치] 첫 설치를 시작합니다. 잠시 기다려 주세요...
 if not exist "%LOCAL_BASE%" mkdir "%LOCAL_BASE%"
 xcopy /E /I /Q /Y "%NET_BASE%%APP_NAME%.exe" "%LOCAL_BASE%\\"
 xcopy /E /I /Q /Y "%NET_BASE%_internal\\" "%LOCAL_BASE%\\_internal\\"
@@ -83,20 +89,28 @@ if exist "%NET_BASE%scripts\\" (
 if exist "%NET_BASE%version.txt" (
     copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
 )
-echo [%APP_NAME%] 설치 완료.
+echo.
+echo [설치 완료]
+echo 로컬 경로: %LOCAL_BASE%
+echo.
+echo 탐색기로 설치 폴더를 엽니다...
+explorer "%LOCAL_BASE%"
+timeout /t 2 >nul
 goto :run
 
 :: ── scripts 업데이트만 적용 ──────────────────────────────────────────
 :update_scripts
-echo [%APP_NAME%] 업데이트를 적용합니다...
+echo [업데이트] 새 버전을 적용합니다...
 if exist "%NET_BASE%scripts\\" (
     xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
 )
 copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
-echo [%APP_NAME%] 업데이트 완료.
+echo [업데이트 완료]
 
 :: ── 로컬에서 실행 ────────────────────────────────────────────────────
 :run
+echo.
+echo 실행 중: %LOCAL_BASE%\\%APP_NAME%.exe
 start "" "%LOCAL_BASE%\\%APP_NAME%.exe"
 endlocal
 """
