@@ -49,6 +49,58 @@ if _scripts not in _sys.path:
 _runpy.run_path(_os.path.join(_scripts, {main_script!r}), run_name='__main__')
 """
 
+# 네트워크 드라이브 배포용 BAT 런처 템플릿
+# 네트워크 → %LOCALAPPDATA% 동기화 후 로컬에서 실행
+# (Windows 보안 정책: 네트워크 경로에서 DLL 로드 차단 우회)
+_BAT_TEMPLATE = """\
+@echo off
+setlocal
+chcp 65001 >nul 2>&1
+
+set APP_NAME={app_name}
+set NET_BASE=%~dp0
+set LOCAL_BASE=%LOCALAPPDATA%\\%APP_NAME%
+
+:: ── 최초 설치 (로컬에 EXE 없음) ─────────────────────────────────────
+if not exist "%LOCAL_BASE%\\%APP_NAME%.exe" goto :full_install
+
+:: ── 버전 비교 (scripts 업데이트 감지) ───────────────────────────────
+if not exist "%NET_BASE%version.txt" goto :run
+if not exist "%LOCAL_BASE%\\version.txt" goto :update_scripts
+fc /b "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul 2>&1
+if errorlevel 1 goto :update_scripts
+goto :run
+
+:: ── 최초 설치 ────────────────────────────────────────────────────────
+:full_install
+echo [%APP_NAME%] 첫 설치 중입니다. 잠시 기다려 주세요...
+if not exist "%LOCAL_BASE%" mkdir "%LOCAL_BASE%"
+xcopy /E /I /Q /Y "%NET_BASE%%APP_NAME%.exe" "%LOCAL_BASE%\\"
+xcopy /E /I /Q /Y "%NET_BASE%_internal\\" "%LOCAL_BASE%\\_internal\\"
+if exist "%NET_BASE%scripts\\" (
+    xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
+)
+if exist "%NET_BASE%version.txt" (
+    copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
+)
+echo [%APP_NAME%] 설치 완료.
+goto :run
+
+:: ── scripts 업데이트만 적용 ──────────────────────────────────────────
+:update_scripts
+echo [%APP_NAME%] 업데이트를 적용합니다...
+if exist "%NET_BASE%scripts\\" (
+    xcopy /E /I /Q /Y "%NET_BASE%scripts\\" "%LOCAL_BASE%\\scripts\\"
+)
+copy /Y "%NET_BASE%version.txt" "%LOCAL_BASE%\\version.txt" >nul
+echo [%APP_NAME%] 업데이트 완료.
+
+:: ── 로컬에서 실행 ────────────────────────────────────────────────────
+:run
+start "" "%LOCAL_BASE%\\%APP_NAME%.exe"
+endlocal
+"""
+
 
 def get_default_output_dir() -> str:
     if getattr(sys, "frozen", False):
@@ -791,17 +843,43 @@ class ExeBuilderApp(tk.Tk):
             copied.append(src_file.name)
 
         self.append_log(f"  [OK] scripts/ 복사 완료: {copied}")
-        self.append_log(f"  배포 구조:")
-        self.append_log(f"    {dist_app_dir}/")
-        self.append_log(f"    ├── {exe_name}.exe  ← 인가 대상")
-        self.append_log(f"    ├── _internal/      ← 런타임 (변경 불필요)")
-        self.append_log(f"    └── scripts/        ← .py 교체만으로 업데이트")
-        for f in copied:
-            self.append_log(f"         └── {f}")
+
+        # ── launch.bat 생성 (네트워크 DLL 로드 차단 우회) ──────────────
+        bat_content = _BAT_TEMPLATE.format(app_name=exe_name)
+        bat_path = dist_app_dir / "launch.bat"
+        try:
+            bat_path.write_text(bat_content, encoding="utf-8")
+            self.append_log(f"  [OK] launch.bat 생성: {bat_path}")
+        except Exception as e:
+            self.append_log(f"  [WARN] launch.bat 생성 실패: {e}")
+
+        # ── version.txt 생성 (업데이트 감지용) ─────────────────────────
+        import datetime
+        ver_content = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ver_path = dist_app_dir / "version.txt"
+        try:
+            ver_path.write_text(ver_content, encoding="utf-8")
+            self.append_log(f"  [OK] version.txt 생성: {ver_content}")
+        except Exception as e:
+            self.append_log(f"  [WARN] version.txt 생성 실패: {e}")
 
         self.append_log("")
-        self.append_log("  ★ 업데이트 방법: scripts/ 안의 .py 파일만 교체하면 됩니다.")
-        self.append_log("  ★ EXE 재인가 불필요.")
+        self.append_log(f"  ┌── 배포 구조 ───────────────────────────────────────")
+        self.append_log(f"  │  {dist_app_dir}/")
+        self.append_log(f"  │  ├── launch.bat     ← ★ 사용자는 이것만 실행")
+        self.append_log(f"  │  ├── {exe_name}.exe  ← 인가 대상 (절대 안 바뀜)")
+        self.append_log(f"  │  ├── _internal/      ← 런타임 (변경 불필요)")
+        self.append_log(f"  │  ├── scripts/        ← 업무 로직")
+        for f in copied:
+            self.append_log(f"  │  │    └── {f}")
+        self.append_log(f"  │  └── version.txt    ← 업데이트 감지용")
+        self.append_log(f"  └───────────────────────────────────────────────────")
+        self.append_log("")
+        self.append_log("  ★ 사용자 실행 방법: launch.bat 실행")
+        self.append_log("     → 첫 실행: %LOCALAPPDATA%에 전체 복사 후 실행")
+        self.append_log("     → 이후: version.txt 비교 후 변경 시만 scripts/ 동기화")
+        self.append_log("  ★ 업데이트 배포: scripts/*.py 교체 + version.txt 갱신")
+        self.append_log("  ★ EXE 재인가 불필요. 로컬 실행이므로 DLL 차단 없음.")
         return True
 
     # ------------------------------------------------------------------
